@@ -206,6 +206,7 @@ a{color:var(--accent-deep)}
 .co-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:11px 16px;background:var(--g5);border-bottom:1px solid var(--line)}
 .co-name{font-weight:700;font-size:14px;color:var(--ink)}
 .co-city{font-size:12px;color:var(--ink-soft)}
+.co-del{margin-left:auto}
 .co-rows{display:flex;flex-direction:column}
 .co-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line)}
 .co-row:last-child{border-bottom:none}
@@ -214,7 +215,7 @@ a{color:var(--accent-deep)}
 .co-pos .exp-btn{color:var(--accent-deep);cursor:pointer;font-size:12px;user-select:none;white-space:nowrap}
 .co-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:6px}
 .co-meta .cell{font-size:12px;color:var(--ink-soft)}
-.co-act{display:flex;align-items:center;justify-content:flex-end}
+.co-act{display:flex;align-items:center;justify-content:flex-end;gap:6px}
 @media(max-width:640px){.co-row{grid-template-columns:1fr}.co-act{justify-content:flex-start;margin-top:4px}}
 
 /* ===================== 漏斗图 ===================== */
@@ -629,6 +630,8 @@ function defaults(){
     kittyDay:null,
     policies:[],
     books:[],
+    hiddenCompanies:[],
+    hiddenJobs:[],
     lastAnalysis:null,
   };
 }
@@ -638,7 +641,7 @@ if(localStorage.getItem(KEY)) save(); // 固化迁移/合并后的数据
 let currentCity = '全部';
 const EXT_PER_PAGE = 50;
 let extPage = 1, extQ = '', extCat = '全部';
-let _flatJobs = [], _rowSeq = 0;
+let _flatJobs = [], _groups = [], _rowSeq = 0;
 let calCursor = new Date();
 let selectedDay = todayStr();
 const pomoStates = {}; // taskId -> {total, remaining, running, paused, pauseStart, interval}
@@ -726,6 +729,14 @@ function mergeData(imp){
       if(x && x.id) ids.add(x.id);
       data[field].push(x);
     });
+  });
+  // 已删除的公司/岗位：并集合并（保证换设备后仍保持删除状态）
+  ['hiddenCompanies','hiddenJobs'].forEach(field=>{
+    if(!Array.isArray(imp[field])) return;
+    if(!Array.isArray(data[field])) data[field] = [];
+    const set = new Set(data[field]);
+    imp[field].forEach(v=>set.add(v));
+    data[field] = Array.from(set);
   });
   // 打卡记录：按 日期+任务 合并（已有优先）
   if(imp.checkins && typeof imp.checkins === 'object'){
@@ -870,8 +881,19 @@ function dedupeJobs(arr){
 }
 function combinedJobs(){
   const arr=[];
-  data.jobs.forEach(j=>arr.push(j));                 // 本地录入/导入优先，去重时保留本地
-  (window.JOBS_DATA||[]).forEach(r=>arr.push(extJob(r)));
+  const hiddenCo = new Set((data.hiddenCompanies||[]).map(s=>String(s).trim().toLowerCase()));
+  const hiddenJ = new Set(data.hiddenJobs||[]);
+  data.jobs.forEach(j=>{                            // 本地录入/导入优先，去重时保留本地
+    if(hiddenCo.has(String(j.company||'').trim().toLowerCase())) return;
+    if(hiddenJ.has(jobKey(j))) return;
+    arr.push(j);
+  });
+  (window.JOBS_DATA||[]).forEach(r=>{
+    const ej=extJob(r);
+    if(hiddenCo.has(String(ej.company||'').trim().toLowerCase())) return;
+    if(hiddenJ.has(jobKey(ej))) return;
+    arr.push(ej);
+  });
   const clean=dedupeJobs(arr).list;
   const q=extQ.trim().toLowerCase();
   return clean.filter(j=>{
@@ -895,6 +917,7 @@ function renderCityJobs(){
   const list=combinedJobs();
   _flatJobs=list;                       // 供 quickApplyExt 索引
   const groups=groupByCompany(list);    // 同一公司合并展示
+  _groups=groups;                       // 供 delCompanyByIndex 索引
   const total=groups.length;
   const pages=Math.max(1,Math.ceil(total/EXT_PER_PAGE));
   if(extPage>pages) extPage=pages;
@@ -905,7 +928,7 @@ function renderCityJobs(){
 
   let body;
   if(!total){ body='<div class="empty">暂无匹配岗位，请调整筛选条件</div>'; }
-  else{ body=pageGroups.map(coGroupHTML).join(''); }
+  else{ body=pageGroups.map((g,i)=>coGroupHTML(g, start+i)).join(''); }
 
   const pager=total>0?`<div class="row" style="margin-top:12px;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
     <span class="muted" style="font-size:12.5px">共 <b>${total}</b> 家公司 · 第 ${extPage}/${pages} 页</span>
@@ -926,7 +949,7 @@ function groupByCompany(list){
   });
   return groups;
 }
-function coGroupHTML(g){
+function coGroupHTML(g, gi){
   const props=[...new Set(g.items.map(x=>x.j.prop).filter(Boolean))];
   const cities=[...new Set(g.items.map(x=>x.j.city).filter(Boolean))];
   return `<div class="co-group">
@@ -934,7 +957,8 @@ function coGroupHTML(g){
       <span class="co-name">🏢 ${esc(g.company)}</span>
       ${props.map(p=>`<span class="tag">${esc(p)}</span>`).join('')}
       ${cities.length?`<span class="co-city">📍 ${esc(cities.join(' / '))}</span>`:''}
-      <span class="badge" style="margin-left:auto">${g.items.length} 个岗位</span>
+      <span class="badge">${g.items.length} 个岗位</span>
+      <button class="btn sm danger co-del" onclick="delCompanyByIndex(${gi})">删除</button>
     </div>
     <div class="co-rows">${g.items.map(coRowHTML).join('')}</div>
   </div>`;
@@ -961,8 +985,8 @@ function coRowHTML(item){
   if(j.batch) meta.push(`<span class="cell">${esc(j.batch)}</span>`);
   if(dlCell) meta.push(dlCell);
   const act=j.ext
-    ? `<button class="btn sm" onclick="quickApplyExt(${idx})">＋投递</button>`
-    : `<button class="btn sm" onclick="quickApply('${j.id}')">＋投递</button>`;
+    ? `<button class="btn sm" onclick="quickApplyExt(${idx})">＋投递</button><button class="btn sm danger" onclick="delExtJobByIdx(${idx})">删除</button>`
+    : `<button class="btn sm" onclick="quickApply('${j.id}')">＋投递</button><button class="btn sm danger" onclick="delJob('${j.id}')">删除</button>`;
   return `<div class="co-row">
     <div class="co-row-main">
       <div class="co-pos" id="${sid}">${posHtml}</div>
@@ -980,6 +1004,27 @@ function togglePos(id){
   else{ full.style.display=''; short.style.display='none'; btn.textContent='收起 ▴'; }
 }
 function quickApplyExt(i){ const j=_flatJobs[i]; if(!j) return; openAppModal({company:j.company,position:j.position,city:j.city,deadline:j.deadline}); }
+function delCompanyByIndex(gi){
+  const g=_groups[gi]; if(!g) return;
+  const name=g.company;
+  if(!confirm('确定删除「'+name+'」的全部岗位信息吗？')) return;
+  data.jobs=data.jobs.filter(j=>String(j.company||'').trim().toLowerCase()!==String(name||'').trim().toLowerCase());
+  if(!data.hiddenCompanies) data.hiddenCompanies=[];
+  if(!data.hiddenCompanies.includes(name)) data.hiddenCompanies.push(name);
+  save();
+  extPage=1;
+  renderInfo();
+  toast('已删除「'+name+'」');
+}
+function delExtJobByIdx(i){
+  const j=_flatJobs[i]; if(!j) return;
+  if(!data.hiddenJobs) data.hiddenJobs=[];
+  const k=jobKey(j);
+  if(!data.hiddenJobs.includes(k)) data.hiddenJobs.push(k);
+  save();
+  renderCityJobs();
+  toast('已删除该岗位');
+}
 function jobCard(j){
   return `<div class="job">
     <div class="top"><div><div class="co">${esc(j.company)}</div><div class="pos">${esc(j.position)}</div></div>
@@ -1602,7 +1647,15 @@ function summarize(id,note){
   if(!note||!note.trim()) return '还没有笔记内容，写完笔记后这里会自动总结今日进展与成果 🌱';
   const lines=note.trim().split('\n').filter(l=>l.trim()).length;
   const words=note.length;
-  return `今日「${t.name}」进展小结：\n· 共记录 ${lines} 段内容，约 ${words} 字；\n· 你专注投入了约 ${t.duration} 分钟；\n· 保持记录就是进步，明天继续 ✨`;
+  const p=pomoStates[id];
+  const secs=p?p.elapsed:0;
+  const durTxt = secs>0 ? Math.floor(secs/60)+' 分 '+String(secs%60).padStart(2,'0')+' 秒' : '0 分钟（开启番茄钟后开始累计）';
+  return `今日「${t.name}」进展小结：\n· 共记录 ${lines} 段内容，约 ${words} 字；\n· 打卡时长（正计时）：${durTxt}；\n· 保持记录就是进步，明天继续 ✨`;
+}
+function updateSummary(taskId){
+  const el=$('sum-'+taskId); if(!el) return;
+  const c=(data.checkins[todayStr()]&&data.checkins[todayStr()][taskId])||{note:''};
+  el.textContent=summarize(taskId, c.note);
 }
 function saveVideo(id,v){ if(!data.checkins[todayStr()]) data.checkins[todayStr()]={}; if(!data.checkins[todayStr()][id]) data.checkins[todayStr()][id]={done:false,note:'',files:[]}; data.checkins[todayStr()][id].video=v; save(); }
 function saveVideoName(id,v){ if(!data.checkins[todayStr()]) data.checkins[todayStr()]={}; if(!data.checkins[todayStr()][id]) data.checkins[todayStr()][id]={done:false,note:'',files:[]}; data.checkins[todayStr()][id].videoName=v; save(); }
@@ -1669,7 +1722,7 @@ function getPomo(taskId){
   if(!pomoStates[taskId]){
     const t=data.tasks.find(x=>x.id===taskId)||data.tasks[0];
     const total=t.duration*60;
-    pomoStates[taskId]={total, remaining:total, running:false, paused:false, pauseStart:null, interval:null};
+    pomoStates[taskId]={total, remaining:total, elapsed:0, running:false, paused:false, pauseStart:null, interval:null};
   }
   return pomoStates[taskId];
 }
@@ -1719,8 +1772,10 @@ function startPomoTicker(taskId){
   const p=getPomo(taskId);
   p.interval=setInterval(()=>{
     if(p.running && !p.paused){
-      p.remaining--; if(p.remaining<=0){ p.remaining=0; finishPomo(taskId); }
+      p.remaining--; p.elapsed++;
+      if(p.remaining<=0){ p.remaining=0; finishPomo(taskId); }
       updatePomoDisplay(taskId);
+      updateSummary(taskId);
     }else if(p.paused && p.pauseStart){
       if((Date.now()-p.pauseStart)/1000>=600){ p.paused=false; p.pauseStart=null; toast('暂停已达10分钟上限，已自动继续'); updatePomoDisplay(taskId); }
     }
